@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  db:
+    image: mysql:8.0
+    container_name: oblix_db
+    restart: always
+    environment:
+      MYSQL_DATABASE: wordpress
+      MYSQL_ROOT_PASSWORD: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - oblix_network
+
+  # WordPress
+  wordpress:
+    image: wordpress:latest
+    container_name: oblix_wordpress
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      # Mount the entire oblix folder as the theme
+      - ./:/var/www/html/wp-content/themes/oblix
+      # Mount WordPress data for persistence
+      - wordpress_data:/var/www/html
+    depends_on:
+      - db
+    networks:
+      - oblix_network
+
+volumes:
+  db_data:
+  wordpress_data:
+
+networks:
+  oblix_network:
+    driver: bridge
