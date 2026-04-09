@@ -200,16 +200,22 @@ final class Oblix_Backend_Manager_Pro {
             return false;
         }
 
-        $workflow_file = 'backend-auto-start.yml';
-        
+        if ($github_repo === 'your-username/your-repo') {
+            $this->log('❌ GitHub repository not configured - Please set correct repo in settings');
+            return false;
+        }
+
+        // Use Bearer token format for GitHub API v3
         $args = array(
             'method'      => 'POST',
             'timeout'     => self::GITHUB_WEBHOOK_TIMEOUT,
             'sslverify'   => false,
             'headers'     => array(
-                'Authorization' => 'token ' . $github_token,
-                'Accept'        => 'application/vnd.github.v3+json',
-                'Content-Type'  => 'application/json'
+                'Authorization' => 'Bearer ' . $github_token,
+                'Accept'        => 'application/vnd.github+json',
+                'User-Agent'    => 'Oblix-Backend-Manager',
+                'Content-Type'  => 'application/json',
+                'X-GitHub-Api-Version' => '2022-11-28'
             ),
             'body'        => json_encode(array(
                 'ref'    => 'main',
@@ -219,25 +225,49 @@ final class Oblix_Backend_Manager_Pro {
             ))
         );
 
-        $url = "https://api.github.com/repos/{$github_repo}/actions/workflows/{$workflow_file}/dispatches";
+        // Use repository_dispatch endpoint (more reliable)
+        $url = "https://api.github.com/repos/{$github_repo}/dispatches";
+        
+        $dispatch_body = array(
+            'event_type' => 'backend-restart',
+            'client_payload' => array(
+                'reason' => $reason,
+                'timestamp' => current_time('mysql')
+            )
+        );
+        
+        $args['body'] = json_encode($dispatch_body);
         
         $response = wp_remote_post($url, $args);
 
         if (is_wp_error($response)) {
-            $this->log('❌ GitHub workflow trigger FAILED: ' . $response->get_error_message());
+            $error_msg = $response->get_error_message();
+            $this->log('❌ GitHub dispatch trigger FAILED: ' . $error_msg);
+            $this->log('   URL: ' . $url);
+            $this->log('   Token: ' . substr($github_token, 0, 15) . '...');
+            $this->log('   Repo: ' . $github_repo);
             return false;
         }
 
         $code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
         
         if ($code === 204) {
-            $this->log('✅ GitHub Actions workflow triggered successfully');
+            $this->log('✅ GitHub Actions dispatch triggered successfully');
+            $this->log('   Event: backend-restart');
             $this->log('   Reason: ' . $reason);
-            $this->log('   Workflow: ' . $workflow_file);
+            $this->log('   Repository: ' . $github_repo);
             return true;
         } else {
-            $this->log('❌ GitHub workflow trigger failed with HTTP ' . $code);
-            $this->log('   Response: ' . wp_remote_retrieve_body($response));
+            $this->log('❌ GitHub dispatch trigger failed with HTTP ' . $code);
+            $this->log('   Response: ' . $body);
+            
+            // Parse error message
+            $error_data = json_decode($body, true);
+            if (isset($error_data['message'])) {
+                $this->log('   Error: ' . $error_data['message']);
+            }
+            
             return false;
         }
     }
