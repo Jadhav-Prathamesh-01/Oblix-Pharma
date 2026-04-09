@@ -1,0 +1,179 @@
+name: Backend Auto-Start
+
+on:
+  # Manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for restart'
+        required: false
+        default: 'Manual restart'
+  
+  # Webhook trigger from WordPress plugin
+  repository_dispatch:
+    types: [backend-restart]
+
+jobs:
+  backend-startup:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Check Backend Health
+        id: health_check
+        continue-on-error: true
+        run: |
+          echo "🔍 Checking backend health..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://api.oblixpharma.com/health --max-time 5)
+          echo "Response Code: $response"
+          echo "status_code=$response" >> $GITHUB_OUTPUT
+          
+          if [ "$response" == "200" ]; then
+            echo "✅ Backend is already ONLINE"
+            exit 0
+          else
+            echo "❌ Backend is OFFLINE (HTTP $response)"
+            exit 1
+          fi
+
+      - name: Backend Already Online - No Action Needed
+        if: steps.health_check.outcome == 'success'
+        run: |
+          echo "✅ No action needed - Backend is already responding"
+          echo ""
+          curl -s https://api.oblixpharma.com/admin/server-status | jq '{status, uptime_formatted, memory_usage_mb}'
+
+      - name: Backend Offline - Starting Restart Sequence
+        if: steps.health_check.outcome == 'failure'
+        run: |
+          echo "🔴 Backend is offline - Initiating startup..."
+          echo ""
+          echo "Startup Steps:"
+          echo "1. SSH connection to Hostinger server"
+          echo "2. Navigate to API directory"
+          echo "3. Set Node.js PATH"
+          echo "4. Start PM2 process"
+          echo "5. Save configuration"
+          echo "6. Verify recovery"
+          echo ""
+
+      - name: SSH - Start PM2 Process
+        if: steps.health_check.outcome == 'failure'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOSTINGER_HOST }}
+          port: ${{ secrets.HOSTINGER_PORT }}
+          username: ${{ secrets.HOSTINGER_USER }}
+          password: ${{ secrets.HOSTINGER_PASSWORD }}
+          script: |
+            echo "✅ Connected to server"
+            
+            # Navigate to API directory
+            cd /home/u926258164/domains/oblixpharma.com/public_html/api
+            echo "📁 Working directory: /api"
+            
+            # Set Node.js path
+            export PATH=/opt/alt/alt-nodejs20/root/usr/bin:$PATH
+            echo "✅ Node.js v20 configured"
+            
+            # Start PM2
+            echo "🚀 Starting PM2..."
+            /opt/alt/alt-nodejs20/root/usr/bin/node ./node_modules/.bin/pm2 start ecosystem.config.js
+            
+            # Wait for warmup
+            sleep 3
+            echo "⏳ Warmup complete"
+            
+            # Save PM2 state
+            /opt/alt/alt-nodejs20/root/usr/bin/node ./node_modules/.bin/pm2 save
+            echo "💾 State saved for reboot recovery"
+            
+            # Show status
+            echo "📊 Process status:"
+            /opt/alt/alt-nodejs20/root/usr/bin/node ./node_modules/.bin/pm2 list
+
+      - name: Verify Backend Recovery
+        if: steps.health_check.outcome == 'failure'
+        id: verify
+        continue-on-error: true
+        run: |
+          echo "🔍 Verifying backend recovery..."
+          
+          for i in {1..5}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" https://api.oblixpharma.com/health --max-time 3)
+            
+            if [ "$response" == "200" ]; then
+              echo "✅ Backend restored successfully! (Attempt $i/5)"
+              echo "verify_success=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            echo "⏳ Attempt $i/5: HTTP $response - Retrying..."
+            sleep 2
+          done
+          
+          echo "❌ Backend failed to respond after 5 attempts"
+          exit 1
+
+      - name: Success - Backend Online
+        if: steps.verify.outcome == 'success'
+        run: |
+          echo "✅ SUCCESS: Backend has been recovered"
+          echo ""
+          echo "📊 Current Status:"
+          curl -s https://api.oblixpharma.com/admin/server-status | jq '{status, uptime_formatted, memory_usage_mb, restart_capability}'
+          echo ""
+          echo "🎉 System is now operational!"
+
+      - name: Failure - Recovery Failed
+        if: steps.health_check.outcome == 'failure' && steps.verify.outcome == 'failure'
+        run: |
+          echo "❌ Backend recovery FAILED"
+          echo ""
+          echo "Troubleshooting:"
+          echo "1. Check server SSH connectivity"
+          echo "2. Verify GitHub Secrets (HOSTINGER_HOST, PORT, USER, PASSWORD)"
+          echo "3. Check server logs: tail -50 /api/logs/pm2-daemon-keeper.log"
+          echo "4. Check disk space and memory on server"
+          exit 1
+
+      - name: Create Success Issue
+        if: steps.verify.outcome == 'success'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '✅ Backend Auto-Start Successful',
+              body: `Backend has been automatically restarted and is now online.
+              
+              **Time:** ${new Date().toISOString()}
+              **Status:** Server recovered and responding
+              **Recovery Time:** ~5-10 seconds`,
+              labels: ['backend', 'auto-start']
+            })
+
+      - name: Create Failure Issue
+        if: steps.health_check.outcome == 'failure' && steps.verify.outcome == 'failure'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Backend Auto-Start FAILED',
+              body: `Backend auto-start was triggered but recovery failed.
+              
+              **Time:** ${new Date().toISOString()}
+              **Status:** Server NOT responding after startup attempt
+              **Action Required:** Manual investigation needed
+              
+              Check:
+              - SSH connection to Hostinger
+              - PM2 logs on server
+              - Server resources (disk/memory)`,
+              labels: ['critical', 'backend']
+            })
